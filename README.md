@@ -236,3 +236,61 @@ mo --input_model yolov5n.onnx --output_dir openvino_model
 
 mo --input_model yolo11n.onnx --output_dir openvino_model
 ```
+
+
+## 코드 동작하기
+### /dev/video2 가상 장치 생성
+
+```bash
+sudo modprobe v4l2loopback video_nr=2 card_label="VirtualCam" exclusive_caps=1
+```
+
+- `/dev/video2`가 생성됩니다.
+- `video_nr=2`는 원하는 번호로 바꿔도 됩니다.
+
+### 가상 장치 확인
+
+```bash
+ls /dev/video2
+v4l2-ctl --list-devices
+```
+
+### 가상 장치 제거
+
+```bash
+sudo modprobe -r v4l2loopback
+```
+
+### 가상 장치에 pi camera 영상 전송
+720p30
+
+```bash
+libcamera-vid -t 0 --width 1280 --height 720 --framerate 30 --codec yuv420 --inline --nopreview -o - | \
+ffmpeg -f rawvideo -pix_fmt yuv420p -s 1280x720 -r 30 -i - -f v4l2 /dev/video2
+```
+
+480p90
+
+```bash
+libcamera-vid -t 0 --width 640 --height 480 --framerate 90 --codec yuv420 --inline --nopreview -o - | \
+ffmpeg -f rawvideo -pix_fmt yuv420p -s 640x480 -r 90 -i - -f v4l2 /dev/video2
+```
+
+
+이 명령어는 아래와 같은 흐름으로 작동
+
+- 전체 구조
+
+```bash
+PiCamera (libcamera-vid) → YUV420 raw 데이터 → 표준 출력(stdout)
+↓
+ffmpeg ← 표준 입력(stdin) ← YUV420 입력
+↓
+/dev/video2 (v4l2loopback 가상 카메라 장치)
+```
+
+libcamera-vid로 영상 스트리밍해서 YUV420 포맷으로 ffmpeg에 데이터 전달
+
+ffmpeg에서 V4L2 가상 장치 /dev/video2로 영상 전달
+
+영상 데이터는 최초에는 raw상태로 받아진게 yuv420으로 인코딩 되고 ffmpeg에서는 딱히 데이터 인코딩 없이 바로 v4l2로 전송
