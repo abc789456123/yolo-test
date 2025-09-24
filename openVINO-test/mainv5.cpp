@@ -4,6 +4,13 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <nlohmann/json.hpp>
+#include <curl/curl.h>
+#include <sstream>
+#include <iomanip>
+#include <thread>
+
+using json = nlohmann::json;
 
 const int input_width = 320;
 const int input_height = 320;
@@ -11,16 +18,109 @@ const float conf_threshold = 0.3;
 const float iou_threshold = 0.45;
 const int target_class = 0; // class 0: person
 
+// 메타데이터 전송 설정
+const std::string METADATA_SERVER_URL = "http://192.168.0.4:8080/metadata";
+
 struct Detection {
     int class_id;
     float confidence;
     cv::Rect box;
+    std::chrono::system_clock::time_point timestamp;
 };
+
+// HTTP POST를 위한 콜백 함수
+static size_t WriteCallback(void *contents, size_t size, size_t nmemb, std::string *data) {
+    data->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
 
 float iou(const cv::Rect& a, const cv::Rect& b) {
     float inter = (a & b).area();
     float uni = a.area() + b.area() - inter;
     return inter / uni;
+}
+
+// JSON 메타데이터 생성 함수 (nlohmann/json 버전)
+json createMetadata(const std::vector<Detection>& detections, int frame_width, int frame_height, double fps) {
+    json metadata;
+    
+    // 현재 시간을 ISO 8601 형식으로 변환
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    
+    std::stringstream ss;
+    ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
+    ss << '.' << std::setfill('0') << std::setw(3) << ms.count() << 'Z';
+    
+    metadata["timestamp"] = ss.str();
+    metadata["frame_width"] = frame_width;
+    metadata["frame_height"] = frame_height;
+    metadata["fps"] = fps;
+    metadata["detection_count"] = detections.size();
+    
+    // nlohmann/json에서는 배열 생성이 매우 간단
+    metadata["objects"] = json::array();
+    
+    for (const auto& det : detections) {
+        json obj = {
+            {"class_id", det.class_id},
+            {"class_name", "person"},  // target_class가 0(person)이므로
+            {"confidence", det.confidence},
+            {"bbox", {
+                {"x", det.box.x},
+                {"y", det.box.y},
+                {"width", det.box.width},
+                {"height", det.box.height}
+            }},
+            {"center", {
+                {"x", det.box.x + det.box.width / 2},
+                {"y", det.box.y + det.box.height / 2}
+            }}
+        };
+        
+        metadata["objects"].push_back(obj);
+    }
+    
+    return metadata;
+}
+
+// HTTP POST로 메타데이터 전송 (nlohmann/json 버전)
+bool sendMetadata(const json& metadata) {
+    CURL *curl;
+    CURLcode res;
+    std::string response;
+    bool success = false;
+    
+    curl = curl_easy_init();
+    if(curl) {
+        std::string json_string = metadata.dump();  // 매우 간단!
+        
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        
+        curl_easy_setopt(curl, CURLOPT_URL, METADATA_SERVER_URL.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_string.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L); // 5초 타임아웃
+        
+        res = curl_easy_perform(curl);
+        
+        if(res == CURLE_OK) {
+            long response_code;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+            if(response_code >= 200 && response_code < 300) {
+                success = true;
+            }
+        }
+        
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+    }
+    
+    return success;
 }
 
 std::vector<Detection> nms(const std::vector<Detection>& dets) {
@@ -110,6 +210,8 @@ int main() {
         auto shape = output.get_shape();  // [1, 25200, 85]
 
         std::vector<Detection> detections;
+        auto detection_time = std::chrono::system_clock::now();
+        
         for (size_t i = 0; i < shape[1]; ++i) {
             const float* row = data + i * 85;
             float obj_conf = row[4];
@@ -138,10 +240,33 @@ int main() {
             int box_w = std::min((int)(x1 - x0), frame.cols - x);
             int box_h = std::min((int)(y1 - y0), frame.rows - y);
 
-            detections.push_back({class_id, conf, cv::Rect(x, y, box_w, box_h)});
+            detections.push_back({class_id, conf, cv::Rect(x, y, box_w, box_h), detection_time});
         }
 
         auto results = nms(detections);
+        
+        // 실시간 FPS 계산
+        auto t2 = clock::now();
+        double fps = 1e9 / std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+        
+        // JSON 메타데이터 생성 및 전송 (감지된 객체가 있을 때만)
+        if (!results.empty()) {
+            json metadata = createMetadata(results, frame.cols, frame.rows, fps);
+            
+            // 메타데이터를 콘솔에 출력 (디버깅용) - nlohmann/json은 indent 파라미터로 예쁘게 출력
+            std::cout << "Sending metadata: " << metadata.dump(2) << std::endl;
+            
+            // 메타데이터 전송 (별도 스레드에서 실행하여 메인 루프 블로킹 방지)
+            std::thread([metadata]() {
+                if (sendMetadata(metadata)) {
+                    std::cout << "Metadata sent successfully" << std::endl;
+                } else {
+                    std::cout << "Failed to send metadata" << std::endl;
+                }
+            }).detach();
+        }
+        
+        // 화면에 감지 결과 그리기
         for (const auto& det : results) {
             cv::rectangle(frame, det.box, cv::Scalar(0, 255, 0), 2);
             std::string label = "person: " + cv::format("%.2f", det.confidence);
@@ -149,12 +274,14 @@ int main() {
         }
 
         // 실시간 FPS 표시
-        auto t2 = clock::now();
-        double fps = 1e9 / std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
         cv::putText(frame, "FPS: " + cv::format("%.2f", fps), {10, 30},
                     cv::FONT_HERSHEY_SIMPLEX, 0.7, {255, 255, 255}, 2);
+        
+        // 감지된 객체 수 표시
+        cv::putText(frame, "Objects: " + std::to_string(results.size()), {10, 60},
+                    cv::FONT_HERSHEY_SIMPLEX, 0.7, {255, 255, 255}, 2);
 
-        cv::imshow("YOLOv5n OpenVINO", frame);
+        cv::imshow("YOLOv5n OpenVINO (nlohmann/json)", frame);
         if (cv::waitKey(1) == 27) break; // ESC 종료
     }
 
@@ -166,12 +293,14 @@ int main() {
 
     return 0;
 }
+
 /*
-compile with: 
-g++ mainv5.cpp -o test_openvino_yolov5 -std=c++17 \
- `pkg-config --cflags --libs opencv4` \
- -I/home/park/openvino/src/inference/include \
- -I/home/park/openvino/src/core/include \
- -L/home/park/openvino/bin/aarch64/Release \
- -lopenvino -lopencv_dnn
-*/ 
+compile with nlohmann/json: 
+g++ -std=c++17 -O2 `pkg-config --cflags opencv4` mainv5_nlohmann.cpp -o test_openvino_yolov5_nlohmann \
+    `pkg-config --libs opencv4` \
+    -I/opt/openvino/runtime/include \
+    -L/opt/openvino/runtime/lib/aarch64 \
+    -lopenvino -lcurl -pthread
+
+Note: nlohmann/json is header-only library, no linking required!
+*/
