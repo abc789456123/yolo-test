@@ -4,6 +4,20 @@
 #include <vector>
 #include <algorithm>
 
+// YOLOv4-tiny class names - 이 모델의 클래스 매핑이 다를 수 있음
+// 만약 클래스 1이 실제로 person이라면 아래와 같이 수정
+static const char* class_names[] = {
+    "background", "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", 
+    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", 
+    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", 
+    "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush"
+};
+
 struct Object
 {
     cv::Rect_<float> rect;
@@ -11,18 +25,18 @@ struct Object
     float prob;
 };
 
-class YoloV5
+class YoloV4Tiny
 {
 public:
-    YoloV5();
-    ~YoloV5();
+    YoloV4Tiny();
+    ~YoloV4Tiny();
     
     int load(const std::string& modelpath, bool use_gpu = false);
     int detect(const cv::Mat& rgb, std::vector<Object>& objects, float prob_threshold = 0.25f, float nms_threshold = 0.45f);
     
 private:
-    ncnn::Net yolov5;
-    int target_size = 320;
+    ncnn::Net yolov4;
+    int target_size = 416;
     float mean_vals[3] = {0.f, 0.f, 0.f};
     float norm_vals[3] = {1/255.f, 1/255.f, 1/255.f};
     
@@ -101,42 +115,42 @@ private:
     }
 };
 
-YoloV5::YoloV5()
+YoloV4Tiny::YoloV4Tiny()
 {
-    yolov5.opt.use_vulkan_compute = false;
-    yolov5.opt.use_fp16_packed = false;
-    yolov5.opt.use_fp16_storage = false;
-    yolov5.opt.use_fp16_arithmetic = false;
-    yolov5.opt.use_int8_storage = false;
-    yolov5.opt.use_int8_arithmetic = false;
+    yolov4.opt.use_vulkan_compute = false;
+    yolov4.opt.use_fp16_packed = false;
+    yolov4.opt.use_fp16_storage = false;
+    yolov4.opt.use_fp16_arithmetic = false;
+    yolov4.opt.use_int8_storage = false;
+    yolov4.opt.use_int8_arithmetic = false;
 }
 
-YoloV5::~YoloV5()
+YoloV4Tiny::~YoloV4Tiny()
 {
 }
 
-int YoloV5::load(const std::string& modelpath, bool use_gpu)
+int YoloV4Tiny::load(const std::string& modelpath, bool use_gpu)
 {
-    yolov5.opt.use_vulkan_compute = use_gpu;
+    yolov4.opt.use_vulkan_compute = use_gpu;
 
-    int ret = yolov5.load_param((modelpath + ".param").c_str());
+    int ret = yolov4.load_param((modelpath + ".param").c_str());
     if (ret != 0)
     {
-        fprintf(stderr, "Failed to load param file: %s\n", (modelpath + ".param").c_str());
+        fprintf(stderr, "Failed to load param file: %s\\n", (modelpath + ".param").c_str());
         return ret;
     }
 
-    ret = yolov5.load_model((modelpath + ".bin").c_str());
+    ret = yolov4.load_model((modelpath + ".bin").c_str());
     if (ret != 0)
     {
-        fprintf(stderr, "Failed to load model file: %s\n", (modelpath + ".bin").c_str());
+        fprintf(stderr, "Failed to load model file: %s\\n", (modelpath + ".bin").c_str());
         return ret;
     }
 
     return 0;
 }
 
-int YoloV5::detect(const cv::Mat& bgr, std::vector<Object>& objects, float prob_threshold, float nms_threshold)
+int YoloV4Tiny::detect(const cv::Mat& bgr, std::vector<Object>& objects, float prob_threshold, float nms_threshold)
 {
     int img_w = bgr.cols;
     int img_h = bgr.rows;
@@ -168,168 +182,68 @@ int YoloV5::detect(const cv::Mat& bgr, std::vector<Object>& objects, float prob_
 
     in_pad.substract_mean_normalize(mean_vals, norm_vals);
 
-    ncnn::Extractor ex = yolov5.create_extractor();
+    ncnn::Extractor ex = yolov4.create_extractor();
+    ex.input("data", in_pad);
 
-        ex.input("in0", in_pad);
+    ncnn::Mat out;
+    ex.extract("output", out);
 
-        ncnn::Mat out;
-        ex.extract("out0", out);
-
-        // Debug: Analyze output structure
-        // Enable detailed debugging for model analysis
-        printf("=== Model Output Analysis ===\n");
-        printf("Dimensions: c=%d, h=%d, w=%d\n", out.c, out.h, out.w);
-        printf("Total elements: %d\n", out.total());
-        
-        if (out.h > 0 && out.w >= 85) {
-            // Print statistics for different ranges
-            printf("\n=== Sample Data Analysis ===\n");
-            for (int sample = 0; sample < std::min(5, out.h); sample++) {
-                const float* row = out.row(sample);
-                printf("Row %d: coords=[%.2f,%.2f,%.2f,%.2f] obj_conf=%.6f classes=[%.6f,%.6f,%.6f,%.6f,%.6f]\n", 
-                       sample, row[0], row[1], row[2], row[3], row[4], 
-                       row[5], row[6], row[7], row[8], row[9]);
-            }
+    // YOLOv4-tiny with Yolov3DetectionOutput layer
+    // The output is already post-processed by NCNN's Yolov3DetectionOutput layer
+    // Format: [batch, num_detections, 6] where 6 = [class_id, confidence, x1, y1, x2, y2]
+    
+    printf("=== YOLOv4-tiny Output Analysis ===\\n");
+    printf("Dimensions: c=%d, h=%d, w=%d\\n", out.c, out.h, out.w);
+    printf("Total elements: %d\\n", out.total());
+    
+    objects.clear();
+    
+    if (out.h > 0) {
+        for (int i = 0; i < out.h; i++) {
+            const float* detection = out.row(i);
             
-            // Check value ranges
-            float min_coord = 999999, max_coord = -999999;
-            float min_conf = 999999, max_conf = -999999;
-            float min_cls = 999999, max_cls = -999999;
+            int class_id = (int)detection[0];
+            float confidence = detection[1];
             
-            for (int i = 0; i < std::min(100, out.h); i++) {
-                const float* row = out.row(i);
-                // Coordinates
-                for (int j = 0; j < 4; j++) {
-                    min_coord = std::min(min_coord, row[j]);
-                    max_coord = std::max(max_coord, row[j]);
-                }
-                // Objectness
-                min_conf = std::min(min_conf, row[4]);
-                max_conf = std::max(max_conf, row[4]);
-                // Classes
-                for (int j = 5; j < std::min(85, out.w); j++) {
-                    min_cls = std::min(min_cls, row[j]);
-                    max_cls = std::max(max_cls, row[j]);
-                }
-            }
+            if (confidence < prob_threshold) continue;
             
-            printf("\n=== Value Ranges (first 100 samples) ===\n");
-            printf("Coordinates: [%.2f, %.2f]\n", min_coord, max_coord);
-            printf("Objectness: [%.6f, %.6f]\n", min_conf, max_conf);
-            printf("Classes: [%.6f, %.6f]\n", min_cls, max_cls);
-        }
-        printf("================================\n\n");
-
-        // out의 shape: [6300, 85] (H, W)
-        int num_proposals = out.h;
-
-        std::vector<Object> proposals;
-        
-        for (int i = 0; i < num_proposals; i++)
-        {
-            const float* row = out.row(i);
+            // Convert normalized coordinates (0-1) to pixel coordinates
+            float x1 = detection[2] * img_w;
+            float y1 = detection[3] * img_h;
+            float x2 = detection[4] * img_w;
+            float y2 = detection[5] * img_h;
             
-            // NCNN model already applies sigmoid - use raw values directly
-            float obj_conf = row[4];
-            if (obj_conf < prob_threshold) continue;
-
-            // NCNN model already applies sigmoid to class scores - use raw values directly
-            float max_cls_score = 0.0f;
-            int class_id = -1;
-            for (int c = 0; c < 80; c++) {
-                if (row[5 + c] > max_cls_score) {
-                    max_cls_score = row[5 + c];
-                    class_id = c;
-                }
-            }
-
-            // Final confidence
-            float conf = obj_conf * max_cls_score;
-            if (conf < prob_threshold) continue;
-
-            // Debug: Print first few detections
-            if (proposals.size() < 5) {
-                printf("Detection %d: obj_conf=%.4f, cls_score=%.4f, final_conf=%.4f, class=%d\n", 
-                       (int)proposals.size(), obj_conf, max_cls_score, conf, class_id);
-            }
-
-            // Use raw coordinates from model (they seem to be in pixel coordinates already)
-            float cx = row[0];
-            float cy = row[1];
-            float w = row[2];
-            float h = row[3];
-
-            // Convert to original image coordinates
-            float x0 = (cx - w / 2 - (wpad / 2)) / scale;
-            float y0 = (cy - h / 2 - (hpad / 2)) / scale;
-            float x1 = (cx + w / 2 - (wpad / 2)) / scale;
-            float y1 = (cy + h / 2 - (hpad / 2)) / scale;
-
             // Clamp to image bounds
-            x0 = std::max(std::min(x0, (float)(img_w - 1)), 0.f);
-            y0 = std::max(std::min(y0, (float)(img_h - 1)), 0.f);
             x1 = std::max(std::min(x1, (float)(img_w - 1)), 0.f);
             y1 = std::max(std::min(y1, (float)(img_h - 1)), 0.f);
-
-            // Skip invalid boxes and apply moderate size filtering
-            if (x1 <= x0 || y1 <= y0) continue;
-            if ((x1 - x0) < 15 || (y1 - y0) < 15) continue;  // Moderate minimum box size
+            x2 = std::max(std::min(x2, (float)(img_w - 1)), 0.f);
+            y2 = std::max(std::min(y2, (float)(img_h - 1)), 0.f);
             
-            // Additional filtering for very low confidence
-            if (conf < prob_threshold * 1.2f) continue;  // Moderate confidence boost required
-
+            // Skip invalid boxes
+            if (x2 <= x1 || y2 <= y1) continue;
+            if ((x2 - x1) < 10 || (y2 - y1) < 10) continue;
+            
             Object obj;
             obj.label = class_id;
-            obj.prob = conf;
-            obj.rect = cv::Rect((int)x0, (int)y0, (int)(x1-x0), (int)(y1-y0));
-            proposals.push_back(obj);
-        }    // sort all proposals by score from highest to lowest
-    qsort_descent_inplace(proposals);
-
-    // apply nms with very strict threshold to reduce overlapping detections
-    std::vector<int> picked;
-    nms_sorted_bboxes(proposals, picked, 0.2f);  // Even stricter NMS
-
-    int count = picked.size();
-
-    objects.resize(count);
-    for (int i = 0; i < count; i++)
-    {
-        objects[i] = proposals[picked[i]];
-
-        // adjust offset to original unpadded
-        float x0 = (objects[i].rect.x - (wpad / 2)) / scale;
-        float y0 = (objects[i].rect.y - (hpad / 2)) / scale;
-        float x1 = (objects[i].rect.x + objects[i].rect.width - (wpad / 2)) / scale;
-        float y1 = (objects[i].rect.y + objects[i].rect.height - (hpad / 2)) / scale;
-
-        // clip
-        x0 = std::max(std::min(x0, (float)(img_w - 1)), 0.f);
-        y0 = std::max(std::min(y0, (float)(img_h - 1)), 0.f);
-        x1 = std::max(std::min(x1, (float)(img_w - 1)), 0.f);
-        y1 = std::max(std::min(y1, (float)(img_h - 1)), 0.f);
-
-        objects[i].rect.x = x0;
-        objects[i].rect.y = y0;
-        objects[i].rect.width = x1 - x0;
-        objects[i].rect.height = y1 - y0;
+            obj.prob = confidence;
+            obj.rect = cv::Rect_<float>(x1, y1, x2 - x1, y2 - y1);
+            
+            objects.push_back(obj);
+            
+            // Debug: Print first few detections with class names
+            if (objects.size() <= 5) {
+                const char* class_name = (class_id >= 0 && class_id < 80) ? class_names[class_id] : "unknown";
+                printf("Detection %d: class=%d (%s), conf=%.4f, bbox=[%.1f,%.1f,%.1f,%.1f]\\n", 
+                       (int)objects.size()-1, class_id, class_name, confidence, x1, y1, x2, y2);
+            }
+        }
     }
+    
+    printf("Found %d valid detections\\n", (int)objects.size());
+    printf("=====================================\\n\\n");
 
     return 0;
 }
-
-// COCO class names
-static const char* class_names[] = {
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-    "hair drier", "toothbrush"
-};
 
 static void draw_objects(const cv::Mat& bgr, const std::vector<Object>& objects)
 {
@@ -385,14 +299,14 @@ static void draw_objects(const cv::Mat& bgr, const std::vector<Object>& objects)
 
 int main()
 {
-    // Initialize YOLOv5
-    YoloV5 yolo;
+    // Initialize YOLOv4-tiny
+    YoloV4Tiny yolo;
     
     // Load model
-    int ret = yolo.load("ncnn-model/yolov5n_320", false);
+    int ret = yolo.load("ncnn-model/yolov4-tiny", false);
     if (ret != 0)
     {
-        fprintf(stderr, "Failed to load YOLOv5 model\n");
+        fprintf(stderr, "Failed to load YOLOv4-tiny model\\n");
         return -1;
     }
     
@@ -400,16 +314,16 @@ int main()
     cv::VideoCapture cap(2, cv::CAP_V4L2);
     if (!cap.isOpened())
     {
-        fprintf(stderr, "Failed to open camera with V4L2 backend\n");
+        fprintf(stderr, "Failed to open camera with V4L2 backend\\n");
         // Try without specifying backend
         cap.open(2);
         if (!cap.isOpened()) {
-            fprintf(stderr, "Failed to open camera\n");
+            fprintf(stderr, "Failed to open camera\\n");
             return -1;
         }
     }
     
-    printf("Camera 2 initialized successfully\n");
+    printf("Camera 2 initialized successfully\\n");
     
     // Set camera properties
     cap.set(cv::CAP_PROP_FRAME_WIDTH, 640);
@@ -422,13 +336,13 @@ int main()
     for (int i = 0; i < 10; i++) {
         cap >> test_frame;
         if (!test_frame.empty()) {
-            printf("Camera is working properly\n");
+            printf("Camera is working properly\\n");
             break;
         }
         cv::waitKey(100);
     }
     
-    printf("Press 'q' to quit\n");
+    printf("Press 'q' to quit\\n");
     
     cv::Mat frame;
     while (true)
@@ -437,21 +351,21 @@ int main()
         cap >> frame;
         if (frame.empty())
         {
-            fprintf(stderr, "Failed to capture frame\n");
+            fprintf(stderr, "Failed to capture frame\\n");
             break;
         }
         
         // Detect objects with moderate thresholds for balanced detection
         std::vector<Object> objects;
-        yolo.detect(frame, objects, 0.5f, 0.45f);  // Moderate confidence threshold
+        yolo.detect(frame, objects, 0.1f, 0.45f);  // Moderate confidence threshold
         
-        printf("Detected %zu objects\n", objects.size());  // Debug output
+        printf("Detected %zu objects\\n", objects.size());  // Debug output
         
         // Draw detection results
         draw_objects(frame, objects);
         
         // Display frame
-        cv::imshow("YOLOv5 Detection", frame);
+        cv::imshow("YOLOv4-tiny Detection", frame);
         
         // Check for exit
         char key = cv::waitKey(1);
